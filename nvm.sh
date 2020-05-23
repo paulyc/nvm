@@ -223,13 +223,29 @@ nvm_install_latest_npm() {
 
     local NVM_IS_6_OR_ABOVE
     NVM_IS_6_OR_ABOVE=0
+    local NVM_IS_6_2_OR_ABOVE
+    NVM_IS_6_2_OR_ABOVE=0
     if [ $NVM_IS_5_OR_ABOVE -eq 1 ] && nvm_version_greater_than_or_equal_to "${NODE_VERSION}" 6.0.0; then
       NVM_IS_6_OR_ABOVE=1
+      if nvm_version_greater_than_or_equal_to "${NODE_VERSION}" 6.2.0; then
+        NVM_IS_6_2_OR_ABOVE=1
+      fi
     fi
 
-    if [ $NVM_IS_4_4_OR_BELOW -eq 1 ] || (\
-      [ $NVM_IS_5_OR_ABOVE -eq 1 ] && nvm_version_greater 5.10.0 "${NODE_VERSION}" \
-    ); then
+    local NVM_IS_9_OR_ABOVE
+    NVM_IS_9_OR_ABOVE=0
+    local NVM_IS_9_3_OR_ABOVE
+    NVM_IS_9_3_OR_ABOVE=0
+    if [ $NVM_IS_6_2_OR_ABOVE -eq 1 ] && nvm_version_greater_than_or_equal_to "${NODE_VERSION}" 9.0.0; then
+      NVM_IS_9_OR_ABOVE=1
+      if nvm_version_greater_than_or_equal_to "${NODE_VERSION}" 9.3.0; then
+        NVM_IS_9_3_OR_ABOVE=1
+      fi
+    fi
+
+    if [ $NVM_IS_4_4_OR_BELOW -eq 1 ] || {
+      [ $NVM_IS_5_OR_ABOVE -eq 1 ] && nvm_version_greater 5.10.0 "${NODE_VERSION}"; \
+    }; then
       nvm_echo '* `npm` `v5.3.x` is the last version that works on `node` 4.x versions below v4.4, or 5.x versions below v5.10, due to `Buffer.alloc`'
       $NVM_NPM_CMD install -g npm@5.3
     elif [ $NVM_IS_4_4_OR_BELOW -eq 0 ] && nvm_version_greater 4.7.0 "${NODE_VERSION}"; then
@@ -238,6 +254,12 @@ nvm_install_latest_npm() {
     elif [ $NVM_IS_6_OR_ABOVE -eq 0 ]; then
       nvm_echo '* `npm` `v5.x` is the last version that works on `node` below `v6.0.0`'
       $NVM_NPM_CMD install -g npm@5
+    elif \
+      { [ $NVM_IS_6_OR_ABOVE -eq 1 ] && [ $NVM_IS_6_2_OR_ABOVE -eq 0 ]; } \
+      || { [ $NVM_IS_9_OR_ABOVE -eq 1 ] && [ $NVM_IS_9_3_OR_ABOVE -eq 0 ]; } \
+    ; then
+      nvm_echo '* `npm` `v6.9` is the last version that works on `node` `v6.0.x`, `v6.1.x`, `v9.0.x`, `v9.1.x`, or `v9.2.x`'
+      $NVM_NPM_CMD install -g npm@6.9
     else
       nvm_echo '* Installing latest `npm`; if this does not work on your node version, please report a bug!'
       $NVM_NPM_CMD install -g npm
@@ -527,7 +549,8 @@ nvm_remote_versions() {
   NVM_LS_REMOTE_POST_MERGED_OUTPUT=''
   if [ -z "${NVM_FLAVOR-}" ] || [ "${NVM_FLAVOR-}" = "${NVM_NODE_PREFIX}" ]; then
     local NVM_LS_REMOTE_OUTPUT
-    NVM_LS_REMOTE_OUTPUT=$(NVM_LTS="${NVM_LTS-}" nvm_ls_remote "${PATTERN-}") &&:
+    # extra space is needed here to avoid weird behavior when `nvm_ls_remote` ends in a `*`
+    NVM_LS_REMOTE_OUTPUT="$(NVM_LTS="${NVM_LTS-}" nvm_ls_remote "${PATTERN-}") " &&:
     NVM_LS_REMOTE_EXIT_CODE=$?
     # split output into two
     NVM_LS_REMOTE_PRE_MERGED_OUTPUT="${NVM_LS_REMOTE_OUTPUT%%v4\.0\.0*}"
@@ -545,15 +568,17 @@ nvm_remote_versions() {
     NVM_LS_REMOTE_IOJS_EXIT_CODE=$?
   fi
 
+  # the `sed` removes both blank lines, and only-whitespace lines (see "weird behavior" ~19 lines up)
   VERSIONS="$(nvm_echo "${NVM_LS_REMOTE_PRE_MERGED_OUTPUT}
 ${NVM_LS_REMOTE_IOJS_OUTPUT}
-${NVM_LS_REMOTE_POST_MERGED_OUTPUT}" | nvm_grep -v "N/A" | command sed '/^$/d')"
+${NVM_LS_REMOTE_POST_MERGED_OUTPUT}" | nvm_grep -v "N/A" | command sed '/^ *$/d')"
 
   if [ -z "${VERSIONS}" ]; then
     nvm_echo 'N/A'
     return 3
   fi
-  nvm_echo "${VERSIONS}"
+  # the `sed` is to remove trailing whitespaces (see "weird behavior" ~25 lines up)
+  nvm_echo "${VERSIONS}" | command sed 's/ *$//g'
   return $NVM_LS_REMOTE_EXIT_CODE || $NVM_LS_REMOTE_IOJS_EXIT_CODE
 }
 
@@ -646,7 +671,7 @@ nvm_change_path() {
   # if the initial path contains BOTH an nvm path (checked for above) and
   # that nvm path is preceded by a system binary path, just prepend the
   # supplementary path instead of replacing it.
-  # https://github.com/creationix/nvm/issues/1652#issuecomment-342571223
+  # https://github.com/nvm-sh/nvm/issues/1652#issuecomment-342571223
   elif nvm_echo "${1-}" | nvm_grep -Eq "(^|:)(/usr(/local)?)?${2-}:.*${NVM_DIR}/[^/]*${2-}" \
     || nvm_echo "${1-}" | nvm_grep -Eq "(^|:)(/usr(/local)?)?${2-}:.*${NVM_DIR}/versions/[^/]*/[^/]*${2-}"; then
     nvm_echo "${3-}${2-}:${1-}"
@@ -830,8 +855,25 @@ nvm_alias() {
     return 1
   fi
 
+  local NVM_ALIAS_DIR
+  NVM_ALIAS_DIR="$(nvm_alias_path)"
+
+  if [ "$(expr "${ALIAS}" : '^lts/-[1-9][0-9]*$')" -gt 0 ]; then
+    local N
+    N="$(echo "${ALIAS}" | cut -d '-' -f 2)"
+    local RESULT
+    RESULT="$(command ls "${NVM_ALIAS_DIR}/lts" | command tail -n "${N}" | command head -n 1)"
+    if [ "${RESULT}" != '*' ]; then
+      nvm_alias "lts/${RESULT}"
+      return $?
+    else
+      nvm_err 'That many LTS releases do not exist yet.'
+      return 2
+    fi
+  fi
+
   local NVM_ALIAS_PATH
-  NVM_ALIAS_PATH="$(nvm_alias_path)/${ALIAS}"
+  NVM_ALIAS_PATH="${NVM_ALIAS_DIR}/${ALIAS}"
   if [ ! -f "${NVM_ALIAS_PATH}" ]; then
     nvm_err 'Alias does not exist.'
     return 2
@@ -1174,7 +1216,7 @@ nvm_ls_remote_index_tab() {
   PATTERN="${3-}"
 
   local VERSIONS
-  if [ -n "${PATTERN}" ]; then
+  if [ -n "${PATTERN}" ] && [ "${PATTERN}" != '*' ]; then
     if [ "${FLAVOR}" = 'iojs' ]; then
       PATTERN="$(nvm_ensure_version_prefix "$(nvm_strip_iojs_prefix "${PATTERN}")")"
     else
@@ -1217,12 +1259,20 @@ nvm_ls_remote_index_tab() {
       nvm_make_alias "${LTS_ALIAS}" "${LTS_VERSION}" >/dev/null 2>&1
     done
 
-  VERSIONS="$({ command awk -v pattern="${PATTERN-}" -v lts="${LTS-}" '{
+  VERSIONS="$({ command awk -v lts="${LTS-}" '{
         if (!$1) { next }
-        if (pattern && tolower($1) !~ tolower(pattern)) { next }
-        if (lts == "*" && $10 ~ /^\-?$/) { next }
+        if (lts && $10 ~ /^\-?$/) { next }
         if (lts && lts != "*" && tolower($10) !~ tolower(lts)) { next }
-        if ($10 !~ /^\-?$/) print $1, $10; else print $1
+        if ($10 !~ /^\-?$/) {
+          if ($10 && $10 != prev) {
+            print $1, $10, "*"
+          } else {
+            print $1, $10
+          }
+        } else {
+          print $1
+        }
+        prev=$10;
       }' \
     | nvm_grep -w "${PATTERN:-.*}" \
     | $SORT_COMMAND; } << EOF
@@ -1419,7 +1469,7 @@ nvm_print_versions() {
   local LTS_FORMAT
   nvm_echo "${1-}" \
   | command sed '1!G;h;$!d' \
-  | command awk '{ if ($2 && a[$2]++) { print $1, "(LTS: " $2 ")" } else if ($2) { print $1, "(Latest LTS: " $2 ")" } else { print $0 } }' \
+  | command awk '{ if ($2 && $3 && $3 == "*") { print $1, "(Latest LTS: " $2 ")" } else if ($2) { print $1, "(LTS: " $2 ")" } else { print $1 } }' \
   | command sed '1!G;h;$!d' \
   | while read -r VERSION_LINE; do
     VERSION="${VERSION_LINE%% *}"
@@ -2117,7 +2167,7 @@ nvm_npm_global_modules() {
   local NPMLIST
   local VERSION
   VERSION="$1"
-  NPMLIST=$(nvm use "${VERSION}" >/dev/null && npm list -g --depth=0 2>/dev/null | command sed 1,1d)
+  NPMLIST=$(nvm use "${VERSION}" >/dev/null && npm list -g --depth=0 2>/dev/null | command sed 1,1d | nvm_grep -v 'UNMET PEER DEPENDENCY')
 
   local INSTALLS
   INSTALLS=$(nvm_echo "${NPMLIST}" | command sed -e '/ -> / d' -e '/\(empty\)/ d' -e 's/^.* \(.*@[^ ]*\).*/\1/' -e '/^npm@[^ ]*.*$/ d' | command xargs)
@@ -2165,7 +2215,7 @@ nvm_die_on_prefix() {
   if [ -n "${NVM_NPM_CONFIG_PREFIX_ENV-}" ]; then
     local NVM_CONFIG_VALUE
     eval "NVM_CONFIG_VALUE=\"\$${NVM_NPM_CONFIG_PREFIX_ENV}\""
-    if [ -n "${NVM_CONFIG_VALUE-}" ]; then
+    if [ -n "${NVM_CONFIG_VALUE-}" ] && ! nvm_tree_contains_path "${NVM_DIR}" "${NVM_CONFIG_VALUE}"; then
       nvm deactivate >/dev/null 2>&1
       nvm_err "nvm is not compatible with the \"${NVM_NPM_CONFIG_PREFIX_ENV}\" environment variable: currently set to \"${NVM_CONFIG_VALUE}\""
       nvm_err "Run \`unset ${NVM_NPM_CONFIG_PREFIX_ENV}\` to unset it."
@@ -2277,7 +2327,10 @@ nvm_check_file_permissions() {
   nvm_is_zsh && setopt local_options nonomatch
   for FILE in "$1"/* "$1"/.[!.]* "$1"/..?* ; do
     if [ -d "$FILE" ]; then
-      if ! nvm_check_file_permissions "$FILE"; then
+      if [ -n "${NVM_DEBUG-}" ]; then
+        nvm_err "${FILE}"
+      fi
+      if ! nvm_check_file_permissions "${FILE}"; then
         return 2
       fi
     elif [ -e "$FILE" ] && [ ! -w "$FILE" ] && [ ! -O "$FILE" ]; then
@@ -2874,6 +2927,7 @@ nvm() {
         fi
       fi
       unset NVM_BIN
+      unset NVM_INC
     ;;
     "use")
       local PROVIDED_VERSION
@@ -2909,6 +2963,10 @@ nvm() {
           VERSION="$(nvm_version "${PROVIDED_VERSION}")"
         fi
         unset NVM_RC_VERSION
+        if [ -z "${VERSION}" ]; then
+          nvm_err 'Please see `nvm --help` or https://github.com/nvm-sh/nvm#nvmrc for more information.'
+          return 127
+        fi
       else
         VERSION="$(nvm_match_version "${PROVIDED_VERSION}")"
       fi
@@ -2967,6 +3025,7 @@ nvm() {
       export PATH
       hash -r
       export NVM_BIN="${NVM_VERSION_DIR}/bin"
+      export NVM_INC="${NVM_VERSION_DIR}/include/node"
       if [ "${NVM_SYMLINK_CURRENT-}" = true ]; then
         command rm -f "${NVM_DIR}/current" && ln -s "${NVM_VERSION_DIR}" "${NVM_DIR}/current"
       fi
@@ -3161,7 +3220,7 @@ nvm() {
         esac
         shift
       done
-      if [ -n "${PATTERN-}" ] && [ -n "${NVM_NO_ALIAS}" ]; then
+      if [ -n "${PATTERN-}" ] && [ -n "${NVM_NO_ALIAS-}" ]; then
         nvm_err '`--no-alias` is not supported when a pattern is provided.'
         return 55
       fi
@@ -3346,14 +3405,24 @@ nvm() {
       local NVM_NODE_PREFIX
       NVM_IOJS_PREFIX="$(nvm_iojs_prefix)"
       NVM_NODE_PREFIX="$(nvm_node_prefix)"
-      case "$1" in
-        "stable" | "unstable" | "${NVM_IOJS_PREFIX}" | "${NVM_NODE_PREFIX}" | "system")
-          nvm_err "${1-} is a default (built-in) alias and cannot be deleted."
-          return 1
-        ;;
-      esac
+      local NVM_ALIAS_EXISTS
+      NVM_ALIAS_EXISTS=0
+      if [ -f "${NVM_ALIAS_DIR}/${1-}" ]; then
+        NVM_ALIAS_EXISTS=1
+      fi
 
-      [ ! -f "${NVM_ALIAS_DIR}/${1-}" ] && nvm_err "Alias ${1-} doesn't exist!" && return
+      if [ $NVM_ALIAS_EXISTS -eq 0 ]; then
+        case "$1" in
+          "stable" | "unstable" | "${NVM_IOJS_PREFIX}" | "${NVM_NODE_PREFIX}" | "system")
+            nvm_err "${1-} is a default (built-in) alias and cannot be deleted."
+            return 1
+          ;;
+        esac
+
+        nvm_err "Alias ${1-} doesn't exist!"
+        return
+      fi
+
       local NVM_ALIAS_ORIGINAL
       NVM_ALIAS_ORIGINAL="$(nvm_alias "${1}")"
       command rm -f "${NVM_ALIAS_DIR}/${1}"
@@ -3464,7 +3533,7 @@ nvm() {
       NVM_VERSION_ONLY=true NVM_LTS="${NVM_LTS-}" nvm_remote_version "${PATTERN:-node}"
     ;;
     "--version")
-      nvm_echo '0.34.0'
+      nvm_echo '0.35.3'
     ;;
     "unload")
       nvm deactivate >/dev/null 2>&1
@@ -3506,7 +3575,7 @@ nvm() {
         nvm_curl_libz_support nvm_command_info nvm_is_zsh nvm_stdout_is_terminal \
         >/dev/null 2>&1
       unset NVM_RC_VERSION NVM_NODEJS_ORG_MIRROR NVM_IOJS_ORG_MIRROR NVM_DIR \
-        NVM_CD_FLAGS NVM_BIN NVM_MAKE_JOBS \
+        NVM_CD_FLAGS NVM_BIN NVM_INC NVM_MAKE_JOBS \
         >/dev/null 2>&1
     ;;
     *)
